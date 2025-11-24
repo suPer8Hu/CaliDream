@@ -1,14 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { ITINERARY_DATA_ZH, ITINERARY_DATA_EN, UI_TEXT } from '../constants';
+import { ITINERARY_DATA_ZH, ITINERARY_DATA_EN } from '../constants';
 import { Language, Spot } from '../types';
-import { MapPin, ArrowRight, Navigation } from 'lucide-react';
-
-// Declare Leaflet types since we are using it via CDN
-declare global {
-  interface Window {
-    L: any;
-  }
-}
+import { MapPin, Navigation } from 'lucide-react';
+import L from 'leaflet';
 
 interface InteractiveMapProps {
   language: Language;
@@ -16,17 +10,15 @@ interface InteractiveMapProps {
 
 const InteractiveMap: React.FC<InteractiveMapProps> = ({ language }) => {
   const mapContainerRef = useRef<HTMLDivElement>(null);
-  const mapInstanceRef = useRef<any>(null);
-  const markersRef = useRef<any[]>([]);
-  const polylineRef = useRef<any>(null);
+  const mapInstanceRef = useRef<L.Map | null>(null);
+  const layerGroupRef = useRef<L.LayerGroup | null>(null);
   
-  const [activeDayId, setActiveDayId] = useState<number | null>(null); // null means "Show All"
+  const [activeDayId, setActiveDayId] = useState<number | null>(null);
   const [activeSpot, setActiveSpot] = useState<Spot | null>(null);
 
   const data = language === 'zh' ? ITINERARY_DATA_ZH : ITINERARY_DATA_EN;
-  const t = UI_TEXT[language];
 
-  // Helper to flatten spots based on selection
+  // Helper to get visible spots
   const getVisibleSpots = () => {
     if (activeDayId) {
       const day = data.find(d => d.id === activeDayId);
@@ -37,101 +29,107 @@ const InteractiveMap: React.FC<InteractiveMapProps> = ({ language }) => {
 
   // Initialize Map
   useEffect(() => {
-    if (!mapContainerRef.current || mapInstanceRef.current) return;
+    if (!mapContainerRef.current) return;
 
-    if (window.L) {
-      const map = window.L.map(mapContainerRef.current, {
-        zoomControl: false,
-        attributionControl: false
-      }).setView([35.5, -120.5], 7); // Center of CA coast
+    if (!mapInstanceRef.current) {
+      const map = L.map(mapContainerRef.current, {
+        zoomControl: false, // We'll add it manually if needed, or keep it clean
+        attributionControl: false // Minimal look
+      }).setView([36.0, -120.5], 7);
 
-      // CartoDB Voyager Tile Layer (Clean, travel-friendly)
-      window.L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
-        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
-        subdomains: 'abcd',
+      // SWITCHED TO ESRI ARCGIS TILES for faster loading and better stability
+      L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}', {
+        attribution: 'Tiles &copy; Esri &mdash; Source: Esri, DeLorme, NAVTEQ, USGS, Intermap, iPC, NRCAN, Esri Japan, METI, Esri China (Hong Kong), Esri (Thailand), TomTom, 2012',
         maxZoom: 19
       }).addTo(map);
-
-      // Add Zoom Control to top-right
-      window.L.control.zoom({
-        position: 'topright'
+      
+      // Add standard zoom control to bottom right
+      L.control.zoom({
+        position: 'bottomright'
       }).addTo(map);
 
       mapInstanceRef.current = map;
+      layerGroupRef.current = L.layerGroup().addTo(map);
     }
   }, []);
 
-  // Update Markers & Route when filter changes
+  // Update Markers and Route
   useEffect(() => {
-    if (!mapInstanceRef.current || !window.L) return;
     const map = mapInstanceRef.current;
-    const L = window.L;
+    const layerGroup = layerGroupRef.current;
+    
+    if (!map || !layerGroup) return;
 
-    // Clear existing
-    markersRef.current.forEach(m => map.removeLayer(m));
-    markersRef.current = [];
-    if (polylineRef.current) map.removeLayer(polylineRef.current);
+    // Clear existing layers
+    layerGroup.clearLayers();
 
     const visibleSpots = getVisibleSpots();
-    const latLngs = visibleSpots.map(s => [s.coordinates.lat, s.coordinates.lng]);
+    const latLngs = visibleSpots.map(s => [s.coordinates.lat, s.coordinates.lng] as [number, number]);
 
-    // Draw Polyline (Route)
+    // 1. Draw Route Polyline
     if (latLngs.length > 1) {
-      polylineRef.current = L.polyline(latLngs, {
-        color: '#FF7844', // cali-orange
+      L.polyline(latLngs, {
+        color: '#FF7844',
         weight: 4,
         opacity: 0.8,
-        dashArray: '10, 10',
+        dashArray: '10, 10', // Dashed line style
         lineCap: 'round'
-      }).addTo(map);
+      }).addTo(layerGroup);
     }
 
-    // Add Markers
-    visibleSpots.forEach((spot) => {
-      const icon = L.divIcon({
-        className: 'custom-div-icon',
+    // 2. Add Markers
+    visibleSpots.forEach(spot => {
+      const isActive = activeSpot?.name === spot.name;
+      
+      const customIcon = L.divIcon({
+        className: 'leaflet-div-icon', // Use our clean class
         html: `
-          <div class="photo-marker ${activeSpot?.name === spot.name ? 'active' : ''}">
+          <div class="photo-marker ${isActive ? 'active' : ''}">
             <img src="https://picsum.photos/seed/${spot.name}/100/100" />
             <div class="marker-label">${spot.name}</div>
           </div>
         `,
-        iconSize: [40, 40],
-        iconAnchor: [20, 46] // Center bottom
+        iconSize: [48, 48],
+        iconAnchor: [24, 54] // Point to bottom center (48 height + 6px arrow)
       });
 
-      const marker = L.marker([spot.coordinates.lat, spot.coordinates.lng], { icon })
-        .addTo(map)
-        .on('click', () => {
-          setActiveSpot(spot);
-          map.flyTo([spot.coordinates.lat, spot.coordinates.lng], 14, { duration: 1.5 });
-          
-          // Scroll sidebar to this item
-          const el = document.getElementById(`card-${spot.name}`);
-          if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        });
-      
-      markersRef.current.push(marker);
+      const marker = L.marker([spot.coordinates.lat, spot.coordinates.lng], { icon: customIcon });
+
+      marker.on('click', () => {
+        setActiveSpot(spot);
+        map.setView([spot.coordinates.lat, spot.coordinates.lng], 14, { animate: true });
+        
+        // Scroll sidebar
+        const el = document.getElementById(`card-${spot.name}`);
+        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      });
+
+      marker.addTo(layerGroup);
     });
 
-    // Fit Bounds if not focusing on a specific spot
+    // 3. Fit Bounds (if not selecting a single spot)
     if (latLngs.length > 0 && !activeSpot) {
-      map.fitBounds(L.latLngBounds(latLngs), { padding: [50, 50], maxZoom: 12 });
+      const bounds = L.latLngBounds(latLngs);
+      map.fitBounds(bounds, { padding: [50, 50] });
     }
 
-  }, [activeDayId, language, activeSpot]); // Re-run when filter or language changes
+  }, [activeDayId, language, activeSpot]); // Re-run when filter changes
 
   return (
     <div className="flex flex-col md:flex-row h-[calc(100vh-80px)] overflow-hidden relative">
       
-      {/* 1. Map Container (Full width on mobile, flexible on desktop) */}
-      <div className="flex-1 relative h-[60vh] md:h-full w-full z-0 bg-gray-100">
-        <div ref={mapContainerRef} className="w-full h-full outline-none" />
+      {/* 1. Map Container */}
+      <div className="flex-1 relative h-[60vh] md:h-full w-full z-0 bg-gray-200">
+        <div ref={mapContainerRef} className="w-full h-full z-0" />
         
         {/* Floating Day Selector on Map */}
-        <div className="absolute top-4 left-4 z-[1000] flex flex-col gap-2 max-h-[80%] overflow-y-auto scrollbar-hide">
+        <div className="absolute top-4 left-4 z-[400] flex flex-col gap-2 max-h-[80%] overflow-y-auto scrollbar-hide pointer-events-auto">
           <button 
-            onClick={() => { setActiveDayId(null); setActiveSpot(null); }}
+            onClick={(e) => { 
+                e.stopPropagation(); 
+                setActiveDayId(null); 
+                setActiveSpot(null); 
+            }}
             className={`px-4 py-2 rounded-full text-sm font-bold shadow-lg transition-all ${
               activeDayId === null ? 'bg-gray-900 text-white' : 'bg-white text-gray-700 hover:bg-gray-50'
             }`}
@@ -141,7 +139,11 @@ const InteractiveMap: React.FC<InteractiveMapProps> = ({ language }) => {
           {data.map(day => (
             <button
               key={day.id}
-              onClick={() => { setActiveDayId(day.id); setActiveSpot(null); }}
+              onClick={(e) => { 
+                  e.stopPropagation(); 
+                  setActiveDayId(day.id); 
+                  setActiveSpot(null); 
+              }}
               className={`px-4 py-2 rounded-full text-xs font-bold shadow-lg transition-all whitespace-nowrap text-left flex items-center gap-2 ${
                 activeDayId === day.id 
                 ? 'bg-cali-orange text-white transform translate-x-2' 
@@ -155,7 +157,7 @@ const InteractiveMap: React.FC<InteractiveMapProps> = ({ language }) => {
         </div>
       </div>
 
-      {/* 2. Sidebar List (Below map on mobile, Right side on desktop) */}
+      {/* 2. Sidebar List */}
       <div className="w-full md:w-96 bg-white border-l border-gray-200 h-full overflow-y-auto scrollbar-hide z-10 shadow-xl flex flex-col">
         <div className="p-4 border-b border-gray-100 bg-white/95 sticky top-0 backdrop-blur z-20">
           <h2 className="font-serif font-bold text-xl text-gray-900 flex items-center gap-2">
@@ -178,7 +180,7 @@ const InteractiveMap: React.FC<InteractiveMapProps> = ({ language }) => {
               onClick={() => {
                 setActiveSpot(spot);
                 if (mapInstanceRef.current) {
-                   mapInstanceRef.current.flyTo([spot.coordinates.lat, spot.coordinates.lng], 14, { duration: 1.5 });
+                    mapInstanceRef.current.setView([spot.coordinates.lat, spot.coordinates.lng], 14, { animate: true });
                 }
               }}
               className={`
